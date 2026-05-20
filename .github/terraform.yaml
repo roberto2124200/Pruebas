@@ -1,0 +1,32 @@
+# Nombre de la Action
+name: Terraform Deployment
+# evento que lo dispara
+on: push
+
+jobs:
+
+# Preparación del ambiente (agregar keys en Github Actions)
+  deploy:
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+# Datos del Runner
+    runs-on: ubuntu-latest
+
+# Pasos a seguir (5)
+    steps:
+    - name: Code Checkout
+      uses: actions/checkout@v4
+    - name: Set Up Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.12.2
+    - name: Terraform Init
+      run:
+        terraform init
+    - name: Terraform Plan
+      run:
+        terraform plan
+    - name: Terraform Apply
+      run: terraform apply -auto-approve
