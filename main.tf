@@ -89,7 +89,7 @@ resource "aws_route_table_association" "subred2_assoc" {
 
 # Security Group único para SSH y HTTP
 resource "aws_security_group" "sg_terraform" {
-  name        = "sg-terraform-ssh-http"
+  name        = "terraform-ssh-http"
   description = "Permite trafico SSH y HTTP"
   vpc_id      = aws_vpc.main.id
 
