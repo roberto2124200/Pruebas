@@ -9,183 +9,82 @@ terraform {
 
 # Región AWS
 provider "aws" {
-  region = "us-east-2"
+  region = var.aws_region
 }
 
-# Zonas de disponibilidad disponibles
-data "aws_availability_zones" "available" {
-  state = "available"
+# Variables principales
+variable "aws_region" {
+  description = "Region AWS donde se desplegaran los recursos"
+  type        = string
+  default     = "us-east-2"
 }
 
-# VPC principal
-resource "aws_vpc" "main" {
-  cidr_block           = "10.20.0.0/20"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-
-  tags = {
-    Name = "terraform-vpc"
-  }
+variable "log_bucket_prefix" {
+  description = "Prefijo para el bucket S3 de logs hacia Microsoft Sentinel"
+  type        = string
+  default     = "sentinel-aws-logs-"
 }
 
-# Internet Gateway creado en la misma VPC
-resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
-
-  tags = {
-    Name = "igw-terraform"
-  }
+variable "sqs_queue_name" {
+  description = "Nombre de la cola SQS para notificaciones de S3 hacia Sentinel"
+  type        = string
+  default     = "sentinel-aws-s3-logs-queue"
 }
 
-# Subred pública 1
-resource "aws_subnet" "subred1" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.20.0.0/24"
-  availability_zone       = data.aws_availability_zones.available.names[0]
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name = "subred1-terraform"
-  }
+variable "cloudtrail_name" {
+  description = "Nombre del trail de CloudTrail"
+  type        = string
+  default     = "sentinel-cloudtrail"
 }
 
-# Subred pública 2
-resource "aws_subnet" "subred2" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.20.1.0/24"
-  availability_zone       = data.aws_availability_zones.available.names[1]
-  map_public_ip_on_launch = true
+# Datos de cuenta y region
+data "aws_caller_identity" "current" {}
 
-  tags = {
-    Name = "subred2-terraform"
-  }
-}
+data "aws_region" "current" {}
 
-# Tabla de rutas pública
-resource "aws_route_table" "public_rt" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
-  }
-
-  tags = {
-    Name = "rt-public-terraform"
-  }
-}
-
-# Asociación de subred 1 a tabla pública
-resource "aws_route_table_association" "subred1_assoc" {
-  subnet_id      = aws_subnet.subred1.id
-  route_table_id = aws_route_table.public_rt.id
-}
-
-# Asociación de subred 2 a tabla pública
-resource "aws_route_table_association" "subred2_assoc" {
-  subnet_id      = aws_subnet.subred2.id
-  route_table_id = aws_route_table.public_rt.id
-}
-
-# Security Group único para SSH y HTTP
-resource "aws_security_group" "sg_terraform" {
-  name        = "terraform-ssh-http"
-  description = "Permite trafico SSH y HTTP"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description = "SSH desde Internet"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "HTTP desde Internet"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    description = "Salida hacia Internet"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "sg-terraform-ssh-http"
-  }
-}
-
-# Bucket S3 público
-# Se usa bucket_prefix porque el nombre exacto "test-terraform" puede estar ocupado globalmente.
-resource "aws_s3_bucket" "public_bucket" {
-  bucket_prefix = "test-terraform-"
+# Bucket S3 privado para logs
+resource "aws_s3_bucket" "sentinel_logs" {
+  bucket_prefix = var.log_bucket_prefix
   force_destroy = true
 
   tags = {
-    Name = "test-terraform-publico"
+    Name        = "sentinel-aws-logs"
+    Purpose     = "Microsoft Sentinel AWS Logs"
+    Environment = "Lab"
   }
 }
 
-# Control de propiedad del bucket
-resource "aws_s3_bucket_ownership_controls" "public_bucket" {
-  bucket = aws_s3_bucket.public_bucket.id
+# Bloqueo de acceso publico
+resource "aws_s3_bucket_public_access_block" "sentinel_logs" {
+  bucket = aws_s3_bucket.sentinel_logs.id
+
+  block_public_acls       = true
+  ignore_public_acls      = true
+  block_public_policy     = true
+  restrict_public_buckets = true
+}
+
+# Ownership del bucket
+resource "aws_s3_bucket_ownership_controls" "sentinel_logs" {
+  bucket = aws_s3_bucket.sentinel_logs.id
 
   rule {
-    object_ownership = "BucketOwnerEnforced"
+    object_ownership = "BucketOwnerPreferred"
   }
-}
-
-# Permitir política pública en el bucket
-resource "aws_s3_bucket_public_access_block" "public_bucket" {
-  bucket = aws_s3_bucket.public_bucket.id
-
-  block_public_acls       = false
-  ignore_public_acls      = false
-  block_public_policy     = false
-  restrict_public_buckets = false
-}
-
-# Política pública de lectura para los objetos del bucket
-resource "aws_s3_bucket_policy" "public_read" {
-  bucket = aws_s3_bucket.public_bucket.id
-
-  depends_on = [
-    aws_s3_bucket_public_access_block.public_bucket
-  ]
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid       = "PublicReadGetObject"
-        Effect    = "Allow"
-        Principal = "*"
-        Action    = "s3:GetObject"
-        Resource  = "${aws_s3_bucket.public_bucket.arn}/*"
-      }
-    ]
-  })
 }
 
 # Versionamiento del bucket
-resource "aws_s3_bucket_versioning" "public_bucket" {
-  bucket = aws_s3_bucket.public_bucket.id
+resource "aws_s3_bucket_versioning" "sentinel_logs" {
+  bucket = aws_s3_bucket.sentinel_logs.id
 
   versioning_configuration {
     status = "Enabled"
   }
 }
 
-# Cifrado por defecto del bucket
-resource "aws_s3_bucket_server_side_encryption_configuration" "public_bucket" {
-  bucket = aws_s3_bucket.public_bucket.id
+# Cifrado por defecto SSE-S3
+resource "aws_s3_bucket_server_side_encryption_configuration" "sentinel_logs" {
+  bucket = aws_s3_bucket.sentinel_logs.id
 
   rule {
     apply_server_side_encryption_by_default {
@@ -194,31 +93,192 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "public_bucket" {
   }
 }
 
-# Outputs
-output "vpc_id" {
-  value = aws_vpc.main.id
+# Prefijos logicos para ordenar fuentes de logs
+resource "aws_s3_object" "prefix_cloudtrail" {
+  bucket  = aws_s3_bucket.sentinel_logs.id
+  key     = "cloudtrail/"
+  content = ""
 }
 
-output "internet_gateway_id" {
-  value = aws_internet_gateway.main.id
+resource "aws_s3_object" "prefix_vpcflow" {
+  bucket  = aws_s3_bucket.sentinel_logs.id
+  key     = "vpcflow/"
+  content = ""
 }
 
-output "subred1_id" {
-  value = aws_subnet.subred1.id
+resource "aws_s3_object" "prefix_guardduty" {
+  bucket  = aws_s3_bucket.sentinel_logs.id
+  key     = "guardduty/"
+  content = ""
 }
 
-output "subred2_id" {
-  value = aws_subnet.subred2.id
+resource "aws_s3_object" "prefix_waf" {
+  bucket  = aws_s3_bucket.sentinel_logs.id
+  key     = "waf/"
+  content = ""
 }
 
-output "route_table_id" {
-  value = aws_route_table.public_rt.id
+resource "aws_s3_object" "prefix_cloudwatch" {
+  bucket  = aws_s3_bucket.sentinel_logs.id
+  key     = "cloudwatch/"
+  content = ""
 }
 
-output "security_group_id" {
-  value = aws_security_group.sg_terraform.id
+resource "aws_s3_object" "prefix_eks" {
+  bucket  = aws_s3_bucket.sentinel_logs.id
+  key     = "eks/"
+  content = ""
 }
 
-output "bucket_name" {
-  value = aws_s3_bucket.public_bucket.bucket
+# Cola SQS estandar para notificaciones del bucket S3
+resource "aws_sqs_queue" "sentinel_s3_notifications" {
+  name                       = var.sqs_queue_name
+  message_retention_seconds  = 1209600
+  visibility_timeout_seconds = 300
+  sqs_managed_sse_enabled    = true
+
+  tags = {
+    Name        = var.sqs_queue_name
+    Purpose     = "Microsoft Sentinel S3 Notifications"
+    Environment = "Lab"
+  }
+}
+
+# Politica de la cola SQS para permitir que S3 publique mensajes
+resource "aws_sqs_queue_policy" "allow_s3_send_message" {
+  queue_url = aws_sqs_queue.sentinel_s3_notifications.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowS3BucketToSendMessages"
+        Effect = "Allow"
+        Principal = {
+          Service = "s3.amazonaws.com"
+        }
+        Action   = "sqs:SendMessage"
+        Resource = aws_sqs_queue.sentinel_s3_notifications.arn
+        Condition = {
+          ArnLike = {
+            "aws:SourceArn" = aws_s3_bucket.sentinel_logs.arn
+          }
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+        }
+      }
+    ]
+  })
+}
+
+# Notificacion S3 hacia SQS cuando lleguen nuevos logs
+resource "aws_s3_bucket_notification" "sentinel_logs_to_sqs" {
+  bucket = aws_s3_bucket.sentinel_logs.id
+
+  queue {
+    queue_arn = aws_sqs_queue.sentinel_s3_notifications.arn
+    events    = ["s3:ObjectCreated:*"]
+  }
+
+  depends_on = [
+    aws_sqs_queue_policy.allow_s3_send_message
+  ]
+}
+
+# Politica del bucket para permitir escritura de CloudTrail
+resource "aws_s3_bucket_policy" "allow_cloudtrail_write" {
+  bucket = aws_s3_bucket.sentinel_logs.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AWSCloudTrailAclCheck"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action   = "s3:GetBucketAcl"
+        Resource = aws_s3_bucket.sentinel_logs.arn
+      },
+      {
+        Sid    = "AWSCloudTrailWrite"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action = "s3:PutObject"
+        Resource = [
+          "${aws_s3_bucket.sentinel_logs.arn}/cloudtrail/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+        ]
+        Condition = {
+          StringEquals = {
+            "s3:x-amz-acl" = "bucket-owner-full-control"
+          }
+        }
+      }
+    ]
+  })
+
+  depends_on = [
+    aws_s3_bucket_public_access_block.sentinel_logs
+  ]
+}
+
+# CloudTrail escribiendo en S3
+resource "aws_cloudtrail" "sentinel_cloudtrail" {
+  name                          = var.cloudtrail_name
+  s3_bucket_name                = aws_s3_bucket.sentinel_logs.id
+  s3_key_prefix                 = "cloudtrail"
+  include_global_service_events = true
+  is_multi_region_trail         = true
+  enable_logging                = true
+
+  depends_on = [
+    aws_s3_bucket_policy.allow_cloudtrail_write
+  ]
+
+  tags = {
+    Name        = var.cloudtrail_name
+    Purpose     = "CloudTrail logs for Microsoft Sentinel"
+    Environment = "Lab"
+  }
+}
+
+# Outputs requeridos para configuracion manual en Sentinel
+output "aws_account_id" {
+  value = data.aws_caller_identity.current.account_id
+}
+
+output "aws_region" {
+  value = data.aws_region.current.name
+}
+
+output "s3_log_bucket_name" {
+  value = aws_s3_bucket.sentinel_logs.bucket
+}
+
+output "s3_log_bucket_arn" {
+  value = aws_s3_bucket.sentinel_logs.arn
+}
+
+output "sqs_queue_name" {
+  value = aws_sqs_queue.sentinel_s3_notifications.name
+}
+
+output "sqs_queue_url" {
+  value = aws_sqs_queue.sentinel_s3_notifications.url
+}
+
+output "sqs_queue_arn" {
+  value = aws_sqs_queue.sentinel_s3_notifications.arn
+}
+
+output "cloudtrail_name" {
+  value = aws_cloudtrail.sentinel_cloudtrail.name
+}
+
+output "cloudtrail_arn" {
+  value = aws_cloudtrail.sentinel_cloudtrail.arn
 }
